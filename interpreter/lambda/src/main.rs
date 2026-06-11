@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Write};
-
 use lalrpop_util::lalrpop_mod;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod ast;
 
@@ -8,6 +8,14 @@ lalrpop_mod!(pub lambda);
 
 #[cfg(test)]
 mod tests;
+
+
+static FRESH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn fresh_name(base: &str) -> String {
+    let n = FRESH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{base}#{n}")
+}
 
 trait Eval {
     fn eval(&self) -> Result<ast::Expr, String>;
@@ -19,7 +27,11 @@ impl Eval for ast::Expr {
         match self {
             ast::Expr::Var(x) => if x == var { val.clone() } else { self.clone() },
             ast::Expr::App(e1,e2) => ast::Expr::App(Box::new(e1.subst(var,val)),Box::new(e2.subst(var,val))),
-            ast::Expr::Abs(x,e) => if x == var { self.clone() } else { ast::Expr::Abs(x.clone(), Box::new(e.subst(var,val))) } // allows capturing
+            ast::Expr::Abs(x,e) => if x == var { self.clone() } else { 
+                let new_x = fresh_name(x);
+                let new_body = e.subst(x,&ast::Expr::Var(new_x.clone()));
+                ast::Expr::Abs(new_x, Box::new(new_body.subst(var,val)))
+            } 
         }
     }
 
