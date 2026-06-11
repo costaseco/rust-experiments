@@ -1,0 +1,20 @@
+use crate::ast::Expr;
+
+grammar;
+
+pub Expr: Box<Expr> = {
+    "\\" <param:Ident> "." <body:Expr> => Box::new(Expr::Abs(param, body)),
+    AppExpr,
+};
+
+AppExpr: Box<Expr> = {
+    <f:AppExpr> <a:AtomExpr> => Box::new(Expr::App(f, a)),
+    AtomExpr,
+};
+
+AtomExpr: Box<Expr> = {
+    Ident => Box::new(Expr::Var(<>)),
+    "(" <Expr> ")",
+};
+
+Ident: String = r"[a-zA-Z_][a-zA-Z0-9_]*" => <>.to_string();
