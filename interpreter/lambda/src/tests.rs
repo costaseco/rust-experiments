@@ -1,6 +1,8 @@
+use std::rc::Rc;
+
 use crate::ast::Expr;
 use crate::lambda;
-use crate::Eval;
+use crate::{Env, Eval, Value};
 
 fn parse(input: &str) -> Expr {
     *lambda::ExprParser::new().parse(input).unwrap()
@@ -85,59 +87,91 @@ fn rejects_invalid_syntax() {
     assert!(lambda::ExprParser::new().parse("").is_err());
 }
 
+/// Evaluates `input` both by substitution (`eval`) and by environment
+/// (`eval_env`, starting from an empty environment).
+fn eval_both(input: &str) -> (Result<Expr, String>, Result<Rc<Value>, String>) {
+    let expr = parse(input);
+    let by_subst = expr.eval();
+    let by_env = expr.eval_env(Rc::new(Env::Empty));
+    (by_subst, by_env)
+}
+
+/// Asserts both evaluation strategies agree that `input` reduces to the free
+/// variable `name`.
+fn assert_reduces_to_var(input: &str, name: &str) {
+    let (by_subst, by_env) = eval_both(input);
+    assert_eq!(by_subst.unwrap(), Expr::Var(name.to_string()));
+    assert_eq!(*by_env.unwrap(), Value::Var(name.to_string()));
+}
+
+/// Asserts both evaluation strategies agree that `input` is ill-formed
+/// (applies something that isn't a function).
+fn assert_invalid_application(input: &str) {
+    let (by_subst, by_env) = eval_both(input);
+    assert!(by_subst.is_err());
+    assert!(by_env.is_err());
+}
+
 #[test]
 fn eval_variable_returns_itself() {
-    assert_eq!(parse("x").eval().unwrap(), Expr::Var("x".to_string()));
+    assert_reduces_to_var("x", "x");
 }
 
 #[test]
 fn eval_abstraction_returns_itself() {
     let expr = parse(r"\x. x");
     assert_eq!(expr.eval().unwrap(), expr);
+
+    match expr.eval_env(Rc::new(Env::Empty)).unwrap().as_ref() {
+        Value::Closure(param, body, _) => {
+            assert_eq!(param, "x");
+            assert_eq!(**body, Expr::Var("x".to_string()));
+        }
+        v => panic!("expected a closure, got {v:?}"),
+    }
 }
 
 #[test]
 fn eval_identity_application() {
-    assert_eq!(parse(r"(\x. x) y").eval().unwrap(), Expr::Var("y".to_string()));
+    assert_reduces_to_var(r"(\x. x) y", "y");
 }
 
 #[test]
 fn eval_constant_function_application() {
     // (\x. \y. x) a b => a, the K combinator discarding its second argument.
-    assert_eq!(parse(r"(\x. \y. x) a b").eval().unwrap(), Expr::Var("a".to_string()));
+    assert_reduces_to_var(r"(\x. \y. x) a b", "a");
 }
 
 #[test]
 fn eval_application_of_non_function_is_an_error() {
     // `x y` applies the free variable `x`, which is not an abstraction.
-    assert!(parse("x y").eval().is_err());
+    assert_invalid_application("x y");
 }
 
 // The following tests document a known limitation of `subst`: it is not
 // capture-avoiding (see the "allows capturing" comment on `Eval::subst`).
-// They encode the *correct*, capture-avoiding result of evaluation and are
-// expected to fail against the current naive implementation.
+// They encode the *correct*, capture-avoiding result of evaluation.
 
 #[test]
 fn eval_capturing_substitution_loses_free_variable() {
     // (\x. \y. x) y is the constant function that always returns the free
     // variable `y`, regardless of its argument. Applying it to `z` should
-    // therefore still yield `y`.
-    //
-    // The naive substitution instead substitutes `y` for `x` inside
-    // `\y. x`, capturing the free `y` and turning the result into the
-    // identity function `\y. y`. Applying that to `z` then yields `z`.
-    assert_eq!(parse(r"(\x. \y. x) y z").eval().unwrap(), Expr::Var("y".to_string()));
+    // therefore still yield `y`. Naive substitution would instead capture
+    // the free `y` and turn the result into the identity function `\y. y`,
+    // making this evaluate to `z`. `eval_env` never has this problem, since
+    // it never substitutes terms into each other -- free variables are
+    // resolved by environment lookup instead.
+    assert_reduces_to_var(r"(\x. \y. x) y z", "y");
 }
 
 #[test]
 fn eval_capturing_substitution_changes_function_identity() {
     // (\x. \y. x) y is alpha-equivalent to a function that ignores its
     // argument and returns `y`, e.g. `\w. y` -- it must NOT be the identity
-    // function `\y. y`.
-    //
-    // The naive substitution captures the free `y`, so the actual result is
-    // `\y. y`, which is the identity function and is therefore wrong.
+    // function `\y. y`. This is a property of `eval`'s *syntactic* output;
+    // `eval_env` represents the result as a closure capturing `y` in its
+    // environment, so there's no equivalent "looks like the identity
+    // function" representation to check here.
     let result = parse(r"(\x. \y. x) y").eval().unwrap();
     assert_ne!(
         result,
