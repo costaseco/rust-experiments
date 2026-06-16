@@ -30,6 +30,7 @@ pub enum Env<V> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Var(String),
+    Num(i32),
     Closure(String, Box<Expr>, Rc<Env<Value>>),
 }
 
@@ -42,6 +43,8 @@ pub enum Value {
 enum ExprDb {
     Var(usize, String),
     Free(String),
+    Num(i32),
+    Add(Box<ExprDb>, Box<ExprDb>),
     Abs(Box<ExprDb>),
     App(Box<ExprDb>, Box<ExprDb>),
 }
@@ -93,7 +96,9 @@ impl Utils<String> for Expr {
                 let new_x = fresh_name(x);
                 let new_body = e.subst(x,&Expr::Var(new_x.clone()));
                 Expr::Abs(new_x, Box::new(new_body.subst(var,val)))
-            } 
+            }, 
+            Expr::Num(_) => self.clone(),
+            Expr::Add(e1,e2) => Expr::Add(Box::new(e1.subst(var,val)),Box::new(e2.subst(var,val))),
         }
     }
 
@@ -111,7 +116,12 @@ impl Utils<String> for Expr {
                 ExprDb::Abs(Box::new(exp.to_debruijn(&new_env)))
             },
             Expr::App(e1,e2) => 
-                ExprDb::App(Box::new(e1.to_debruijn(&env)),Box::new(e2.to_debruijn(&env)))
+                ExprDb::App(Box::new(e1.to_debruijn(&env)),Box::new(e2.to_debruijn(&env))),
+
+            Expr::Num(n) => ExprDb::Num(*n),
+
+            Expr::Add(e1,e2) => 
+                ExprDb::Add(Box::new(e1.to_debruijn(&env)),Box::new(e2.to_debruijn(&env))),
         }
     }
 }
@@ -123,7 +133,9 @@ impl Utils<usize> for ExprDb {
             ExprDb::App(e1, e2) => ExprDb::App(Box::new(e1.subst(var,val)),Box::new(e2.subst(var,val))),
             ExprDb::Abs(body) => 
                 ExprDb::Abs(Box::new(body.subst(&(var+1),val))),
-            ExprDb::Free(..) => self.clone()
+            ExprDb::Free(..) => self.clone(),
+            ExprDb::Num(_) => self.clone(),
+            ExprDb::Add(e1, e2) => ExprDb::Add(Box::new(e1.subst(var,val)),Box::new(e2.subst(var,val))),            
         }
     }
 
@@ -136,7 +148,8 @@ impl Eval for Expr {
     fn eval(&self) -> Result<Rc<Expr>, String> {
         match self {
             Expr::Var(_) => Ok(Rc::new(self.clone())),
-            Expr::Abs(_, _) => Ok(Rc::new(self.clone())),
+            Expr::Abs(..) => Ok(Rc::new(self.clone())),
+            Expr::Num(_) => Ok(Rc::new(self.clone())),
             Expr::App(e1, e2) => {
                 let e1 = e1.eval();
                 match e1 {
@@ -148,6 +161,18 @@ impl Eval for Expr {
                         _ => Err("Not an abstraction".into())
                     },
                     Err(s) => Err(s)
+                }
+            },
+            Expr::Add(e1,e2) => {
+                let v1 = e1.eval();
+                let v2 = e2.eval();
+                match (v1,v2) {
+                    (Ok(n), Ok(m)) => match (n.as_ref(),m.as_ref()) {
+                        (Expr::Num(n), Expr::Num(m)) => Ok(Rc::new(Expr::Num(*n + *m))),
+                        _ => Err("Expecting integers".into())
+                    },
+                    (Err(s),_) => Err(s),
+                    (_,Err(s)) => Err(s)
                 }
             }
         }
@@ -181,6 +206,19 @@ impl EvalEnv for Expr {
                     Err(s) => Err(s)
                 }
             }
+            Expr::Num(x) => Ok(Rc::new(Value::Num(*x))),
+            Expr::Add(e1,e2) => {
+                let v1 = e1.eval_env(env.clone());
+                let v2 = e2.eval_env(env);
+                match (v1,v2) {
+                    (Ok(n), Ok(m)) => match (n.as_ref(),m.as_ref()) {
+                        (Value::Num(n), Value::Num(m)) => Ok(Rc::new(Value::Num(*n + *m))),
+                        _ => Err("Expecting integers".into())
+                    },
+                    (Err(s),_) => Err(s),
+                    (_,Err(s)) => Err(s)
+                }
+            }
         }
     }
 }
@@ -197,8 +235,13 @@ impl ExprDb {
                 ExprDb::Abs(Box::new(body.shift(barrier+1))),
 
             ExprDb::App(e1, e2) => 
-                ExprDb::App(Box::new(e1.shift(barrier)), Box::new(e2.shift(barrier)))
-        }
+                ExprDb::App(Box::new(e1.shift(barrier)), Box::new(e2.shift(barrier))),
+                
+            ExprDb::Num(_) => self.clone(),
+
+            ExprDb::Add(e1, e2) => 
+                ExprDb::Add(Box::new(e1.shift(barrier)), Box::new(e2.shift(barrier))),
+            }
     }
 }
 
@@ -208,6 +251,20 @@ impl Eval for ExprDb {
         match self {
             ExprDb::Var(..) => Err("Should not occur".to_string()),
             ExprDb::Free(..) => Ok(Rc::new(self.clone())),
+            ExprDb::Num(_) => Ok(Rc::new(self.clone())),
+            ExprDb::Add(e1,e2) => {
+                let v1 = e1.eval();
+                let v2 = e2.eval();
+                match (v1,v2) {
+                    (Ok(n), Ok(m)) => match (n.as_ref(),m.as_ref()) {
+                        (ExprDb::Num(n), ExprDb::Num(m)) => Ok(Rc::new(ExprDb::Num(*n + *m))),
+                        _ => Err("Expecting integers".into())
+                    },
+                    (Err(s),_) => Err(s),
+                    (_,Err(s)) => Err(s)
+                }
+            }
+
             ExprDb::Abs(..) =>  Ok(Rc::new(self.clone())),
             ExprDb::App(e1, e2) => {
                 let e1 = e1.eval();
@@ -250,7 +307,13 @@ fn main() {
         }
 
         match parser.parse(line) {
-            Ok(expr) => { println!("{:?} = {:?} = {:?} = {:?}", expr, expr.eval().unwrap(), expr.eval_env(Rc::new(Env::Empty)).unwrap(),expr.to_debruijn(&Env::Empty).eval().unwrap())},
+            Ok(expr) => { 
+                print!("{:?} = ", expr); 
+                println!("{:?} = {:?} = {:?}", 
+                    expr.eval().unwrap(), 
+                    expr.eval_env(Rc::new(Env::Empty)).unwrap(),
+                    expr.to_debruijn(&Env::Empty).eval().unwrap())
+                },
             Err(err) => println!("parse error: {}", err),
         }
     }

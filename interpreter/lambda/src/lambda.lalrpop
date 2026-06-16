@@ -4,8 +4,13 @@ grammar;
 
 pub Expr: Box<Expr> = {
     "\\" <param:Ident> "." <body:Expr> => Box::new(Expr::Abs(param, body)),
-    AppExpr,
+    AddExpr,
 };
+
+pub AddExpr: Box<Expr> = {
+    <a:AddExpr> "+" <b:AppExpr> => Box::new(Expr::Add(a,b)),
+    AppExpr,
+}
 
 AppExpr: Box<Expr> = {
     <f:AppExpr> <a:AtomExpr> => Box::new(Expr::App(f, a)),
@@ -14,7 +19,9 @@ AppExpr: Box<Expr> = {
 
 AtomExpr: Box<Expr> = {
     Ident => Box::new(Expr::Var(<>)),
+    Num => Box::new(Expr::Num(<>)),
     "(" <Expr> ")",
 };
 
 Ident: String = r"[a-zA-Z_][a-zA-Z0-9_]*" => <>.to_string();
+Num: i32 = r"[1-9][0-9_]*" => <>.parse().unwrap();

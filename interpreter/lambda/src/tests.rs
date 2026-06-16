@@ -14,6 +14,11 @@ fn parses_variable() {
 }
 
 #[test]
+fn parses_integers() {
+    assert_eq!(parse("32"), Expr::Num(32));
+}
+
+#[test]
 fn parses_abstraction() {
     assert_eq!(
         parse(r"\x. x"),
@@ -85,6 +90,7 @@ fn rejects_invalid_syntax() {
     assert!(lambda::ExprParser::new().parse(r"\x.").is_err());
     assert!(lambda::ExprParser::new().parse("(x").is_err());
     assert!(lambda::ExprParser::new().parse("").is_err());
+    assert!(lambda::ExprParser::new().parse("01").is_err());
 }
 
 /// Evaluates `input` via substitution (`eval`), environment (`eval_env`), and
@@ -113,6 +119,15 @@ fn assert_reduces_to_var(input: &str, name: &str) {
     assert_eq!(*by_db.unwrap(), ExprDb::Free(name.to_string()));
 }
 
+/// Asserts all three evaluation strategies agree that `input` reduces to the
+/// number `value`.
+fn assert_reduces_to_number(input: &str, value: i32) {
+    let (by_subst, by_env, by_db) = eval_all(input);
+    assert_eq!(*by_subst.unwrap(), Expr::Num(value));
+    assert_eq!(*by_env.unwrap(), Value::Num(value));
+    assert_eq!(*by_db.unwrap(), ExprDb::Num(value));
+}
+
 /// Asserts all three evaluation strategies agree that `input` is ill-formed
 /// (applies something that isn't a function).
 fn assert_invalid_application(input: &str) {
@@ -125,6 +140,19 @@ fn assert_invalid_application(input: &str) {
 #[test]
 fn eval_variable_returns_itself() {
     assert_reduces_to_var("x", "x");
+}
+
+#[test]
+fn eval_numbers() {
+    assert_reduces_to_number("1", 1);
+    assert_reduces_to_number("123", 123);
+}
+
+#[test]
+fn eval_add() {
+    assert_reduces_to_number("1+1", 2);
+    assert_reduces_to_number("1+1+1+1", 4);
+    assert_reduces_to_number("123+321", 444);
 }
 
 #[test]
@@ -150,6 +178,13 @@ fn eval_abstraction_returns_itself() {
 #[test]
 fn eval_identity_application() {
     assert_reduces_to_var(r"(\x. x) y", "y");
+}
+
+#[test]
+fn eval_functions_and_numbers() {
+    assert_reduces_to_number(r"(\x. x) 1", 1);
+    assert_reduces_to_number(r"(\x. (1+1)) 1", 2);
+    assert_reduces_to_number(r"(\x. x+1) 1", 2);
 }
 
 #[test]
