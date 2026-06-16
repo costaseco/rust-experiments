@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::ast::Expr;
 use crate::lambda;
-use crate::{Env, Eval, Value};
+use crate::{Env, Eval, EvalEnv, ExprDb, Utils, Value};
 
 fn parse(input: &str) -> Expr {
     *lambda::ExprParser::new().parse(input).unwrap()
@@ -87,29 +87,39 @@ fn rejects_invalid_syntax() {
     assert!(lambda::ExprParser::new().parse("").is_err());
 }
 
-/// Evaluates `input` both by substitution (`eval`) and by environment
-/// (`eval_env`, starting from an empty environment).
-fn eval_both(input: &str) -> (Result<Expr, String>, Result<Rc<Value>, String>) {
+/// Evaluates `input` via substitution (`eval`), environment (`eval_env`), and
+/// De Bruijn index evaluation (convert then `eval`), all starting from an empty
+/// environment.
+fn eval_all(
+    input: &str,
+) -> (
+    Result<Rc<Expr>, String>,
+    Result<Rc<Value>, String>,
+    Result<Rc<ExprDb>, String>,
+) {
     let expr = parse(input);
     let by_subst = expr.eval();
     let by_env = expr.eval_env(Rc::new(Env::Empty));
-    (by_subst, by_env)
+    let by_db = expr.to_debruijn(&Env::Empty).eval();
+    (by_subst, by_env, by_db)
 }
 
-/// Asserts both evaluation strategies agree that `input` reduces to the free
-/// variable `name`.
+/// Asserts all three evaluation strategies agree that `input` reduces to the
+/// free variable `name`.
 fn assert_reduces_to_var(input: &str, name: &str) {
-    let (by_subst, by_env) = eval_both(input);
-    assert_eq!(by_subst.unwrap(), Expr::Var(name.to_string()));
+    let (by_subst, by_env, by_db) = eval_all(input);
+    assert_eq!(*by_subst.unwrap(), Expr::Var(name.to_string()));
     assert_eq!(*by_env.unwrap(), Value::Var(name.to_string()));
+    assert_eq!(*by_db.unwrap(), ExprDb::Free(name.to_string()));
 }
 
-/// Asserts both evaluation strategies agree that `input` is ill-formed
+/// Asserts all three evaluation strategies agree that `input` is ill-formed
 /// (applies something that isn't a function).
 fn assert_invalid_application(input: &str) {
-    let (by_subst, by_env) = eval_both(input);
+    let (by_subst, by_env, by_db) = eval_all(input);
     assert!(by_subst.is_err());
     assert!(by_env.is_err());
+    assert!(by_db.is_err());
 }
 
 #[test]
@@ -120,7 +130,7 @@ fn eval_variable_returns_itself() {
 #[test]
 fn eval_abstraction_returns_itself() {
     let expr = parse(r"\x. x");
-    assert_eq!(expr.eval().unwrap(), expr);
+    assert_eq!(*expr.eval().unwrap(), expr);
 
     match expr.eval_env(Rc::new(Env::Empty)).unwrap().as_ref() {
         Value::Closure(param, body, _) => {
@@ -129,6 +139,12 @@ fn eval_abstraction_returns_itself() {
         }
         v => panic!("expected a closure, got {v:?}"),
     }
+
+    // \x. x in De Bruijn is Abs(Var(0, "x")); eval returns it unchanged (it's a value).
+    assert_eq!(
+        *expr.to_debruijn(&Env::Empty).eval().unwrap(),
+        ExprDb::Abs(Box::new(ExprDb::Var(0, "x".to_string())))
+    );
 }
 
 #[test]
@@ -151,6 +167,8 @@ fn eval_application_of_non_function_is_an_error() {
 // The following tests document a known limitation of `subst`: it is not
 // capture-avoiding (see the "allows capturing" comment on `Eval::subst`).
 // They encode the *correct*, capture-avoiding result of evaluation.
+// De Bruijn evaluation is capture-free by construction and agrees with the
+// correct result in both cases.
 
 #[test]
 fn eval_capturing_substitution_loses_free_variable() {
@@ -158,23 +176,78 @@ fn eval_capturing_substitution_loses_free_variable() {
     // variable `y`, regardless of its argument. Applying it to `z` should
     // therefore still yield `y`. Naive substitution would instead capture
     // the free `y` and turn the result into the identity function `\y. y`,
-    // making this evaluate to `z`. `eval_env` never has this problem, since
-    // it never substitutes terms into each other -- free variables are
-    // resolved by environment lookup instead.
+    // making this evaluate to `z`. Neither `eval_env` nor De Bruijn eval
+    // have this problem.
     assert_reduces_to_var(r"(\x. \y. x) y z", "y");
 }
 
 #[test]
 fn eval_capturing_substitution_changes_function_identity() {
-    // (\x. \y. x) y is alpha-equivalent to a function that ignores its
-    // argument and returns `y`, e.g. `\w. y` -- it must NOT be the identity
-    // function `\y. y`. This is a property of `eval`'s *syntactic* output;
-    // `eval_env` represents the result as a closure capturing `y` in its
-    // environment, so there's no equivalent "looks like the identity
-    // function" representation to check here.
+    // (\x. \y. x) y must NOT be the identity function `\y. y`.
+    // For substitution-based eval the result is a renamed abstraction;
+    // for De Bruijn eval it is Abs(Free("y")) — a function that ignores its
+    // argument and returns the free `y`, not the bound one.
     let result = parse(r"(\x. \y. x) y").eval().unwrap();
     assert_ne!(
-        result,
+        *result,
         Expr::Abs("y".to_string(), Box::new(Expr::Var("y".to_string())))
+    );
+
+    let db_result = parse(r"(\x. \y. x) y").to_debruijn(&Env::Empty).eval().unwrap();
+    assert_ne!(
+        *db_result,
+        ExprDb::Abs(Box::new(ExprDb::Var(0, "y".to_string())))
+    );
+    assert_eq!(
+        *db_result,
+        ExprDb::Abs(Box::new(ExprDb::Free("y".to_string())))
+    );
+}
+
+#[test]
+fn eval_self_application() {
+    // (\x. x x) (\y. y) — self-application of the identity function.
+    // Exercises substituting a lambda as both function and argument simultaneously.
+    let expr = parse(r"(\x. x x) (\y. y)");
+
+    assert_eq!(
+        *expr.eval().unwrap(),
+        Expr::Abs("y".to_string(), Box::new(Expr::Var("y".to_string())))
+    );
+
+    match expr.eval_env(Rc::new(Env::Empty)).unwrap().as_ref() {
+        Value::Closure(param, body, _) => {
+            assert_eq!(param, "y");
+            assert_eq!(**body, Expr::Var("y".to_string()));
+        }
+        v => panic!("expected a closure, got {v:?}"),
+    }
+
+    assert_eq!(
+        *expr.to_debruijn(&Env::Empty).eval().unwrap(),
+        ExprDb::Abs(Box::new(ExprDb::Var(0, "y".to_string())))
+    );
+}
+
+#[test]
+fn eval_ski_combinator() {
+    // S K K w = w — the SKI algebraic identity.
+    // Requires four nested beta reductions through three distinct variable
+    // scopes; stresses that indices/environments stay consistent across reductions.
+    // S = \x.\y.\z. x z (y z),  K = \a.\b. a
+    assert_reduces_to_var(
+        r"(\x.\y.\z. x z (y z)) (\a.\b.a) (\a.\b.a) w",
+        "w",
+    );
+}
+
+#[test]
+fn eval_church_succ_zero() {
+    // Church encoding: succ zero, when applied to the identity and a free
+    // variable, returns that variable.  succ zero = one, so one id a = id a = a.
+    // succ = \n.\f.\x. f (n f x),  zero = \f.\x. x,  id = \y. y
+    assert_reduces_to_var(
+        r"(\n.\f.\x. f (n f x)) (\f.\x.x) (\y.y) a",
+        "a",
     );
 }

@@ -22,7 +22,7 @@ fn fresh_name(base: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum Env<V> {
+pub enum Env<V> {
     Empty,
     Node(String, Rc<V>, Rc<Env<V>>),
 }
@@ -33,8 +33,22 @@ pub enum Value {
     Closure(String, Box<Expr>, Rc<Env<Value>>),
 }
 
+/// A lambda term using De Bruijn indices: bound variables are represented by
+/// their binding depth (0 = the nearest enclosing `Abs`), so `Abs` no longer
+/// needs to carry a name. Free variables are kept by name, matching how
+/// `Expr::Var`/`Value::Var` already treat them as ordinary values rather than
+/// errors.
+#[derive(Debug, Clone, PartialEq)]
+enum ExprDb {
+    Var(usize, String),
+    Free(String),
+    Abs(Box<ExprDb>),
+    App(Box<ExprDb>, Box<ExprDb>),
+}
+
+
 impl<V:Clone> Env<V> {
-    fn push(&self, var:&String, val: Rc<V>) -> Env<V> {
+    fn push(&self, var:&String, val:Rc<V>) -> Env<V> {
         Env::Node(var.clone(), val, Rc::new(self.clone()))
     }
 
@@ -46,16 +60,32 @@ impl<V:Clone> Env<V> {
                 else { next.find(var) }
         }
     }
+
+    fn find_idx(&self, var:&String) -> Result<usize,String> {
+        match self {
+            Env::Empty => Err(format!("Variable not found {}",var)),
+            Env::Node(x, _, next) => 
+                if x == var { Ok(0) } 
+                else { next.find_idx(var).and_then(|idx| Ok(1+idx)) }
+        }
+    } 
 }
 
 trait Eval {
-    fn eval(&self) -> Result<Expr, String>;
-    fn eval_env(&self, env:Rc<Env<Value>>) -> Result<Rc<Value>, String>;
-    fn subst(&self, var: &str, val: &Expr) -> Expr;
+    fn eval(&self) -> Result<Rc<Self>, String>;
 }
 
-impl Eval for Expr {
-    fn subst(&self, var: &str, val: &Expr) -> Expr {
+trait EvalEnv {
+    fn eval_env(&self, env:Rc<Env<Value>>) -> Result<Rc<Value>, String>;
+}
+
+trait Utils<T> {
+    fn subst(&self, var: &T, val: &Self) -> Self;
+    fn to_debruijn(&self, env: &Env<()>) -> ExprDb;
+}
+
+impl Utils<String> for Expr {
+    fn subst(&self, var: &String, val: &Expr) -> Expr {
         match self {
             Expr::Var(x) => if x == var { val.clone() } else { self.clone() },
             Expr::App(e1,e2) => Expr::App(Box::new(e1.subst(var,val)),Box::new(e2.subst(var,val))),
@@ -67,27 +97,72 @@ impl Eval for Expr {
         }
     }
 
-    fn eval(&self) -> Result<Expr, String> {
+    fn to_debruijn(&self, env: &Env<()>) -> ExprDb {
         match self {
-            Expr::Var(_) => Ok(self.clone()),
-            Expr::Abs(_, _) => Ok(self.clone()),
+            Expr::Var(x) => {
+                let res_idx = env.find_idx(x);
+                match res_idx {
+                    Ok(idx) => ExprDb::Var(idx, x.clone()),
+                    Err(_) => ExprDb::Free(x.clone())
+                }
+            }
+            Expr::Abs(x, exp) => {
+                let new_env = env.push(x, Rc::new(()));
+                ExprDb::Abs(Box::new(exp.to_debruijn(&new_env)))
+            },
+            Expr::App(e1,e2) => 
+                ExprDb::App(Box::new(e1.to_debruijn(&env)),Box::new(e2.to_debruijn(&env)))
+        }
+    }
+}
+
+impl Utils<usize> for ExprDb {
+    fn subst(&self, var: &usize, val: &ExprDb) -> ExprDb {
+        match self {
+            ExprDb::Var(x, _) => if x == var { val.clone() } else { self.clone() },
+            ExprDb::App(e1, e2) => ExprDb::App(Box::new(e1.subst(var,val)),Box::new(e2.subst(var,val))),
+            ExprDb::Abs(body) => 
+                ExprDb::Abs(Box::new(body.subst(&(var+1),val))),
+            ExprDb::Free(..) => self.clone()
+        }
+    }
+
+    fn to_debruijn(&self, _: &Env<()>) -> ExprDb {
+        self.clone()
+    }
+}
+
+impl Eval for Expr {
+    fn eval(&self) -> Result<Rc<Expr>, String> {
+        match self {
+            Expr::Var(_) => Ok(Rc::new(self.clone())),
+            Expr::Abs(_, _) => Ok(Rc::new(self.clone())),
             Expr::App(e1, e2) => {
                 let e1 = e1.eval();
                 match e1 {
-                    Ok(Expr::Abs(param, body)) => {
-                        let body = body.subst(&param, &e2);
-                        body.eval()
-                    }
-                    Ok(_) => Err("Invalid application".into()),
+                    Ok(rc) => match rc.as_ref() {
+                        Expr::Abs(param, body) => {
+                            let body = body.subst(&param, &e2);
+                            body.eval()
+                        },
+                        _ => Err("Not an abstraction".into())
+                    },
                     Err(s) => Err(s)
                 }
             }
         }
     }
+}
+
+impl EvalEnv for Expr {
 
     fn eval_env(&self, env: Rc<Env<Value>>) -> Result<Rc<Value>, String> {
         match self {
-            Expr::Var(x) => env.find(x).map(|v: Rc<Value>| v.clone()).or(Ok(Rc::new(Value::Var(x.clone())))),
+            Expr::Var(x) => 
+                env
+                .find(x)
+                .map(|v| v.clone())
+                .or(Ok(Rc::new(Value::Var(x.clone())))),
             Expr::Abs(x, e) => Ok(Rc::new(Closure(x.clone(), e.clone(), env.clone()))),
             Expr::App(e1, e2) => {
                 let v1 = e1.eval_env(env.clone());
@@ -107,7 +182,48 @@ impl Eval for Expr {
                 }
             }
         }
+    }
+}
 
+impl ExprDb {
+    fn shift(&self, barrier:usize) -> ExprDb {
+        match self {
+            ExprDb::Var(idx,name) => 
+                if *idx >= barrier { ExprDb::Var(idx+1, name.clone()) } else { self.clone() },
+            
+            ExprDb::Free(_) => self.clone(),
+            
+            ExprDb::Abs(body) => 
+                ExprDb::Abs(Box::new(body.shift(barrier+1))),
+
+            ExprDb::App(e1, e2) => 
+                ExprDb::App(Box::new(e1.shift(barrier)), Box::new(e2.shift(barrier)))
+        }
+    }
+}
+
+impl Eval for ExprDb {
+
+    fn eval(&self) -> Result<Rc<ExprDb>, String> {
+        match self {
+            ExprDb::Var(..) => Err("Should not occur".to_string()),
+            ExprDb::Free(..) => Ok(Rc::new(self.clone())),
+            ExprDb::Abs(..) =>  Ok(Rc::new(self.clone())),
+            ExprDb::App(e1, e2) => {
+                let e1 = e1.eval();
+                match e1 {
+                    Ok(rc) => match rc.as_ref() {
+                        ExprDb::Abs(body) => {
+                            let shifted_arg = e2.shift(0);
+                            let body = body.subst(&0, &shifted_arg);
+                            body.eval()
+                        },
+                        _ => Err("Invalid application".into())
+                    },
+                    Err(s) => Err(s)
+                }
+            }
+        }
     }
 }
 
@@ -134,7 +250,7 @@ fn main() {
         }
 
         match parser.parse(line) {
-            Ok(expr) => { println!("{:?} = {:?} = {:?}", expr, expr.eval().unwrap(), expr.eval_env(Rc::new(Env::Empty)).unwrap())},
+            Ok(expr) => { println!("{:?} = {:?} = {:?} = {:?}", expr, expr.eval().unwrap(), expr.eval_env(Rc::new(Env::Empty)).unwrap(),expr.to_debruijn(&Env::Empty).eval().unwrap())},
             Err(err) => println!("parse error: {}", err),
         }
     }
