@@ -1,9 +1,14 @@
 
+
+use std::rc::Rc;
+
+pub type Expr = Rc<ExprNode>;
+
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
+pub enum ExprNode {
     Var(String),
     Num(i32),
-    Add(Box<Expr>, Box<Expr>),
-    Abs(String, Box<Expr>),
-    App(Box<Expr>, Box<Expr>),
+    Add(Expr, Expr),
+    Abs(String, Expr),
+    App(Expr, Expr),
 }
