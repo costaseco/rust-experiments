@@ -1,3 +1,5 @@
+#![warn(clippy::pedantic)]
+
 use std::io::{self, BufRead, Write};
 use lalrpop_util::lalrpop_mod;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,7 +24,7 @@ fn fresh_name(base: &str) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Env<V> {
     Empty,
-    Node(String, Rc<V>, Rc<Env<V>>),
+    Node(String, V, Rc<Env<V>>),
 }
 
 type Value = Rc<ValueNode>;
@@ -30,7 +32,7 @@ type Value = Rc<ValueNode>;
 pub enum ValueNode {
     Var(String),
     Num(i32),
-    Closure(String, Value, Rc<Env<Value>>),
+    Closure(String, Expr, Rc<Env<Value>>),
 }
 
 /// A lambda term using De Bruijn indices: bound variables are represented by
@@ -52,11 +54,11 @@ enum ExprDbNode {
 
 
 impl<V:Clone> Env<V> {
-    fn push(&self, var: &String, val: Rc<V>) -> Env<V> {
+    fn push(&self, var: &String, val: V) -> Env<V> {
         Env::Node(var.clone(), val, Rc::new(self.clone()))
     }
 
-    fn find(&self, var: &String) -> Result<Rc<V>,String> {
+    fn find(&self, var: &String) -> Result<V,String> {
         match self {
             Env::Empty => Err(format!("Variable not found {}",var)),
             Env::Node(x,val,next) => 
@@ -75,11 +77,11 @@ impl<V:Clone> Env<V> {
     } 
 }
 
-trait Eval {
-    fn eval(&self) -> Result<Rc<Self>, String>;
+trait Eval : Sized {
+    fn eval(&self) -> Result<Self, String>;
 }
 
-trait EvalEnv {
+trait EvalEnv : Sized {
     fn eval_env(&self, env:Rc<Env<Value>>) -> Result<Value, String>;
 }
 
@@ -125,7 +127,7 @@ impl ToDebruijn for Expr {
                 }
             }
             ExprNode::Abs(x, exp) => {
-                let new_env = env.push(x, Rc::new(()));
+                let new_env = env.push(x, ());
                 Rc::new(ExprDbNode::Abs(exp.to_debruijn(&new_env)))
             },
             ExprNode::App(e1,e2) => 
@@ -161,144 +163,130 @@ impl Subst<usize> for ExprDb {
 
 }
 
-impl Eval for ExprNode {
+impl Eval for Expr {
     fn eval(&self) -> Result<Expr, String> {
-        match self {
-            ExprNode::Var(_) => Ok(self),
+        match self.as_ref() {
+            ExprNode::Var(_) => Ok(self.clone()),
 
-            ExprNode::Abs(..) => Ok(self),
+            ExprNode::Abs(..) => Ok(self.clone()),
 
             ExprNode::Num(_) => Ok(self.clone()),
 
             ExprNode::App(e1, e2) => {
                 let e1 = e1.eval();
-                match e1 {
-                    Ok(rc) => match rc.as_ref() {
-                        ExprNode::Abs(param, body) => {
-                            let body = body.subst(&param, &e2);
-                            body.eval()
-                        },
-                        _ => Err("Not an abstraction".into())
+                match e1?.as_ref() {
+                    ExprNode::Abs(param, body) => {
+                        let body = body.subst(&param, &e2);
+                        body.eval()
                     },
-                    Err(s) => Err(s)
+                    _ => Err("Not an abstraction".into())
                 }
             },
 
             ExprNode::Add(e1,e2) => {
-                let v1 = e1.eval();
-                let v2 = e2.eval();
-                match (v1,v2) {
-                    (Ok(n), Ok(m)) => match (n.as_ref(),m.as_ref()) {
-                        (ExprNode::Num(n), ExprNode::Num(m)) => Ok(Rc::new(ExprNode::Num(*n + *m))),
-                        _ => Err("Expecting integers".into())
-                    },
-                    (Err(s),_) => Err(s),
-                    (_,Err(s)) => Err(s)
+                match (e1.eval()?.as_ref(),e2.eval()?.as_ref()) {
+                    (ExprNode::Num(n), ExprNode::Num(m)) => Ok(Rc::new(ExprNode::Num(*n + *m))),
+                    _ => Err("Expecting integers".into())
                 }
             }
         }
     }
 }
 
-impl EvalEnv for Expr {
 
+
+impl EvalEnv for Expr {
     fn eval_env(&self, env: Rc<Env<Value>>) -> Result<Value, String> {
         match self.as_ref() {
             ExprNode::Var(x) => 
                 env
                 .find(x)
                 .map(|v| v.clone())
-                .or(Ok(ValueNode::Var(x.clone()))),
-            ExprNode::Abs(x, e) => Ok(Rc::new(ValueNode::Closure(x.clone(), e.clone(), env.clone()))),
-            Expr::App(e1, e2) => {
+                .or(Ok(Rc::new(ValueNode::Var(x.clone())))),
+
+            ExprNode::Abs(x, e) => 
+                Ok(Rc::new(ValueNode::Closure(x.clone(), e.clone(), env.clone()))),
+
+            ExprNode::App(e1, e2) => {
                 let v1 = e1.eval_env(env.clone());
                 let v2 = e2.eval_env(env);
-                match v1 {
-                    Ok(rc) => match rc.as_ref() {
-                            Value::Closure(param, body, env_closure) => {
-                            match v2 {
-                                Ok(v2  ) =>
-                                    body.eval_env(Rc::new(env_closure.clone().push(param, v2.clone()))),
-                                Err(_) => v2
-                            }
-                        },
-                        _ => Err("Invalid application".into())
+                match v1?.as_ref() {
+                    ValueNode::Closure(param, body, env_closure) => {
+                        body.eval_env(Rc::new(env_closure.clone().push(param, v2?.clone())))
                     },
-                    Err(s) => Err(s)
+                    _ => Err("Expecting an abstraction".into())
                 }
             }
-            Expr::Num(x) => Ok(Rc::new(Value::Num(*x))),
-            Expr::Add(e1,e2) => {
+            ExprNode::Num(x) => Ok(Rc::new(ValueNode::Num(*x))),
+
+            ExprNode::Add(e1,e2) => {
                 let v1 = e1.eval_env(env.clone());
                 let v2 = e2.eval_env(env);
-                match (v1,v2) {
-                    (Ok(n), Ok(m)) => match (n.as_ref(),m.as_ref()) {
-                        (Value::Num(n), Value::Num(m)) => Ok(Rc::new(Value::Num(*n + *m))),
+                match (v1?.as_ref(),v2?.as_ref()) {
+                    (ValueNode::Num(n), ValueNode::Num(m)) => Ok(Rc::new(ValueNode::Num(*n + *m))),
                         _ => Err("Expecting integers".into())
-                    },
-                    (Err(s),_) => Err(s),
-                    (_,Err(s)) => Err(s)
                 }
             }
         }
     }
 }
 
-impl ExprDb {
+trait Shift : Sized {
+    fn shift(&self, barrier:usize) -> Self;
+}
+
+impl Shift for ExprDb {
     fn shift(&self, barrier:usize) -> ExprDb {
-        match self {
+        match self.as_ref() {
             ExprDbNode::Var(idx,name) => 
-                if *idx >= barrier { ExprDbNode::Var(idx+1, name.clone()) } else { self.clone() },
+                if *idx >= barrier { Rc::new(ExprDbNode::Var(idx+1, name.clone())) } else { self.clone() },
             
             ExprDbNode::Free(_) => self.clone(),
             
             ExprDbNode::Abs(body) => 
-                ExprDbNode::Abs(Box::new(body.shift(barrier+1))),
+                Rc::new(ExprDbNode::Abs(body.shift(barrier+1))),
 
             ExprDbNode::App(e1, e2) => 
-                ExprDbNode::App(Box::new(e1.shift(barrier)), Box::new(e2.shift(barrier))),
+                Rc::new(ExprDbNode::App(e1.shift(barrier),e2.shift(barrier))),
                 
             ExprDbNode::Num(_) => self.clone(),
 
             ExprDbNode::Add(e1, e2) => 
-                ExprDbNode::Add(Box::new(e1.shift(barrier)), Box::new(e2.shift(barrier))),
+                Rc::new(ExprDbNode::Add(e1.shift(barrier), e2.shift(barrier))),
             }
     }
 }
 
 impl Eval for ExprDb {
 
-    fn eval(&self) -> Result<Rc<ExprDb>, String> {
-        match self {
+    fn eval(&self) -> Result<ExprDb, String> {
+        match self.as_ref() {
             ExprDbNode::Var(..) => Err("Should not occur".to_string()),
-            ExprDbNode::Free(..) => Ok(Rc::new(self.clone())),
-            ExprDbNode::Num(_) => Ok(Rc::new(self.clone())),
+
+            ExprDbNode::Free(..) => Ok(self.clone()),
+
+            ExprDbNode::Num(_) => Ok(self.clone()),
+
             ExprDbNode::Add(e1,e2) => {
                 let v1 = e1.eval();
                 let v2 = e2.eval();
-                match (v1,v2) {
-                    (Ok(n), Ok(m)) => match (n.as_ref(),m.as_ref()) {
-                        (ExprDbNode::Num(n), ExprDbNode::Num(m)) => Ok(Rc::new(ExprDbNode::Num(*n + *m))),
+                match (v1?.as_ref(),v2?.as_ref()) {
+                    (ExprDbNode::Num(n), ExprDbNode::Num(m)) => Ok(Rc::new(ExprDbNode::Num(*n + *m))),
                         _ => Err("Expecting integers".into())
-                    },
-                    (Err(s),_) => Err(s),
-                    (_,Err(s)) => Err(s)
                 }
             }
 
-            ExprDbNode::Abs(..) =>  Ok(Rc::new(self.clone())),
+            ExprDbNode::Abs(..) =>  Ok(self.clone()),
+
             ExprDbNode::App(e1, e2) => {
                 let e1 = e1.eval();
-                match e1 {
-                    Ok(rc) => match rc.as_ref() {
-                        ExprDbNode::Abs(body) => {
-                            let shifted_arg = e2.shift(0);
-                            let body = body.subst(&0, &shifted_arg);
-                            body.eval()
-                        },
-                        _ => Err("Invalid application".into())
+                match e1?.as_ref() {
+                    ExprDbNode::Abs(body) => {
+                        let shifted_arg = e2.shift(0);
+                        let body = body.subst(&0, &shifted_arg);
+                        body.eval()
                     },
-                    Err(s) => Err(s)
+                    _ => Err("Invalid application".into())
                 }
             }
         }

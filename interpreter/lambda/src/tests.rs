@@ -1,41 +1,42 @@
 use std::rc::Rc;
 
 use crate::ast::Expr;
+use crate::ast::ExprNode;
 use crate::lambda;
-use crate::{Env, Eval, EvalEnv, ExprDb, ToDebruijn, Value};
+use crate::{Env, Eval, EvalEnv, ExprDb, ToDebruijn, Value, ValueNode, ExprDbNode};
 
 fn parse(input: &str) -> Expr {
-    *lambda::ExprParser::new().parse(input).unwrap()
+    lambda::ExprParser::new().parse(input).unwrap()
 }
 
 #[test]
 fn parses_variable() {
-    assert_eq!(parse("x"), Expr::Var("x".to_string()));
+    assert_eq!(*parse("x"), ExprNode::Var("x".to_string()));
 }
 
 #[test]
 fn parses_integers() {
-    assert_eq!(parse("32"), Expr::Num(32));
+    assert_eq!(*parse("32"), ExprNode::Num(32));
 }
 
 #[test]
 fn parses_abstraction() {
     assert_eq!(
-        parse(r"\x. x"),
-        Expr::Abs("x".to_string(), Box::new(Expr::Var("x".to_string())))
+        *parse(r"\x. x"),
+        ExprNode::Abs("x".to_string(), Rc::new(ExprNode::Var("x".to_string())))
     );
 }
 
 #[test]
 fn parses_application_left_associative() {
     assert_eq!(
-        parse("x y z"),
-        Expr::App(
-            Box::new(Expr::App(
-                Box::new(Expr::Var("x".to_string())),
-                Box::new(Expr::Var("y".to_string()))
+        *parse("x y z"),
+        ExprNode::App(
+            Rc::new(ExprNode::App(
+                Rc::new(ExprNode::Var("x".to_string())),
+                Rc::new(ExprNode::Var("y".to_string()))
             )),
-            Box::new(Expr::Var("z".to_string()))
+            Rc::new(ExprNode::Var("z".to_string()))
         )
     );
 }
@@ -43,12 +44,12 @@ fn parses_application_left_associative() {
 #[test]
 fn abstraction_body_extends_as_far_as_possible() {
     assert_eq!(
-        parse(r"\x. x y"),
-        Expr::Abs(
+        *parse(r"\x. x y"),
+        ExprNode::Abs(
             "x".to_string(),
-            Box::new(Expr::App(
-                Box::new(Expr::Var("x".to_string())),
-                Box::new(Expr::Var("y".to_string()))
+            Rc::new(ExprNode::App(
+                Rc::new(ExprNode::Var("x".to_string())),
+                Rc::new(ExprNode::Var("y".to_string()))
             ))
         )
     );
@@ -57,13 +58,13 @@ fn abstraction_body_extends_as_far_as_possible() {
 #[test]
 fn parses_parenthesized_expression() {
     assert_eq!(
-        parse(r"(\x. x) y"),
-        Expr::App(
-            Box::new(Expr::Abs(
+        *parse(r"(\x. x) y"),
+        ExprNode::App(
+            Rc::new(ExprNode::Abs(
                 "x".to_string(),
-                Box::new(Expr::Var("x".to_string()))
+                Rc::new(ExprNode::Var("x".to_string()))
             )),
-            Box::new(Expr::Var("y".to_string()))
+            Rc::new(ExprNode::Var("y".to_string()))
         )
     );
 }
@@ -71,14 +72,14 @@ fn parses_parenthesized_expression() {
 #[test]
 fn parses_nested_abstractions() {
     assert_eq!(
-        parse(r"\x. \y. x y"),
-        Expr::Abs(
+        *parse(r"\x. \y. x y"),
+        ExprNode::Abs(
             "x".to_string(),
-            Box::new(Expr::Abs(
+            Rc::new(ExprNode::Abs(
                 "y".to_string(),
-                Box::new(Expr::App(
-                    Box::new(Expr::Var("x".to_string())),
-                    Box::new(Expr::Var("y".to_string()))
+                Rc::new(ExprNode::App(
+                    Rc::new(ExprNode::Var("x".to_string())),
+                    Rc::new(ExprNode::Var("y".to_string()))
                 ))
             ))
         )
@@ -99,9 +100,9 @@ fn rejects_invalid_syntax() {
 fn eval_all(
     input: &str,
 ) -> (
-    Result<Rc<Expr>, String>,
-    Result<Rc<Value>, String>,
-    Result<Rc<ExprDb>, String>,
+    Result<Expr, String>,
+    Result<Value, String>,
+    Result<ExprDb, String>,
 ) {
     let expr = parse(input);
     let by_subst = expr.eval();
@@ -114,18 +115,18 @@ fn eval_all(
 /// free variable `name`.
 fn assert_reduces_to_var(input: &str, name: &str) {
     let (by_subst, by_env, by_db) = eval_all(input);
-    assert_eq!(*by_subst.unwrap(), Expr::Var(name.to_string()));
-    assert_eq!(*by_env.unwrap(), Value::Var(name.to_string()));
-    assert_eq!(*by_db.unwrap(), ExprDb::Free(name.to_string()));
+    assert_eq!(*by_subst.unwrap(), ExprNode::Var(name.to_string()));
+    assert_eq!(*by_env.unwrap(), ValueNode::Var(name.to_string()));
+    assert_eq!(*by_db.unwrap(), ExprDbNode::Free(name.to_string()));
 }
 
 /// Asserts all three evaluation strategies agree that `input` reduces to the
 /// number `value`.
 fn assert_reduces_to_number(input: &str, value: i32) {
     let (by_subst, by_env, by_db) = eval_all(input);
-    assert_eq!(*by_subst.unwrap(), Expr::Num(value));
-    assert_eq!(*by_env.unwrap(), Value::Num(value));
-    assert_eq!(*by_db.unwrap(), ExprDb::Num(value));
+    assert_eq!(*by_subst.unwrap(), ExprNode::Num(value));
+    assert_eq!(*by_env.unwrap(), ValueNode::Num(value));
+    assert_eq!(*by_db.unwrap(), ExprDbNode::Num(value));
 }
 
 /// Asserts all three evaluation strategies agree that `input` is ill-formed
@@ -158,12 +159,12 @@ fn eval_add() {
 #[test]
 fn eval_abstraction_returns_itself() {
     let expr = parse(r"\x. x");
-    assert_eq!(*expr.eval().unwrap(), expr);
+    assert_eq!(*expr.eval().unwrap(), *expr);
 
     match expr.eval_env(Rc::new(Env::Empty)).unwrap().as_ref() {
-        Value::Closure(param, body, _) => {
+        ValueNode::Closure(param, body, _) => {
             assert_eq!(param, "x");
-            assert_eq!(**body, Expr::Var("x".to_string()));
+            assert_eq!(**body, ExprNode::Var("x".to_string()));
         }
         v => panic!("expected a closure, got {v:?}"),
     }
@@ -171,7 +172,7 @@ fn eval_abstraction_returns_itself() {
     // \x. x in De Bruijn is Abs(Var(0, "x")); eval returns it unchanged (it's a value).
     assert_eq!(
         *expr.to_debruijn(&Env::Empty).eval().unwrap(),
-        ExprDb::Abs(Box::new(ExprDb::Var(0, "x".to_string())))
+        ExprDbNode::Abs(Rc::new(ExprDbNode::Var(0, "x".to_string())))
     );
 }
 
@@ -225,17 +226,17 @@ fn eval_capturing_substitution_changes_function_identity() {
     let result = parse(r"(\x. \y. x) y").eval().unwrap();
     assert_ne!(
         *result,
-        Expr::Abs("y".to_string(), Box::new(Expr::Var("y".to_string())))
+        ExprNode::Abs("y".to_string(), Rc::new(ExprNode::Var("y".to_string())))
     );
 
     let db_result = parse(r"(\x. \y. x) y").to_debruijn(&Env::Empty).eval().unwrap();
     assert_ne!(
         *db_result,
-        ExprDb::Abs(Box::new(ExprDb::Var(0, "y".to_string())))
+        ExprDbNode::Abs(Rc::new(ExprDbNode::Var(0, "y".to_string())))
     );
     assert_eq!(
         *db_result,
-        ExprDb::Abs(Box::new(ExprDb::Free("y".to_string())))
+        ExprDbNode::Abs(Rc::new(ExprDbNode::Free("y".to_string())))
     );
 }
 
@@ -247,20 +248,20 @@ fn eval_self_application() {
 
     assert_eq!(
         *expr.eval().unwrap(),
-        Expr::Abs("y".to_string(), Box::new(Expr::Var("y".to_string())))
+        ExprNode::Abs("y".to_string(), Rc::new(ExprNode::Var("y".to_string())))
     );
 
     match expr.eval_env(Rc::new(Env::Empty)).unwrap().as_ref() {
-        Value::Closure(param, body, _) => {
+        ValueNode::Closure(param, body, _) => {
             assert_eq!(param, "y");
-            assert_eq!(**body, Expr::Var("y".to_string()));
+            assert_eq!(**body, ExprNode::Var("y".to_string()));
         }
         v => panic!("expected a closure, got {v:?}"),
     }
 
     assert_eq!(
         *expr.to_debruijn(&Env::Empty).eval().unwrap(),
-        ExprDb::Abs(Box::new(ExprDb::Var(0, "y".to_string())))
+        ExprDbNode::Abs(Rc::new(ExprDbNode::Var(0, "y".to_string())))
     );
 }
 

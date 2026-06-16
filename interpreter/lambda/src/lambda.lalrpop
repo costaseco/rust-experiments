@@ -1,25 +1,27 @@
+use std::rc::Rc;
 use crate::ast::Expr;
+use crate::ast::ExprNode;
 
 grammar;
 
-pub Expr: Box<Expr> = {
-    "\\" <param:Ident> "." <body:Expr> => Box::new(Expr::Abs(param, body)),
+pub Expr: Expr = {
+    "\\" <param:Ident> "." <body:Expr> => Rc::new(ExprNode::Abs(param, body)),
     AddExpr,
 };
 
-pub AddExpr: Box<Expr> = {
-    <a:AddExpr> "+" <b:AppExpr> => Box::new(Expr::Add(a,b)),
+AddExpr: Expr = {
+    <a:AddExpr> "+" <b:AppExpr> => Rc::new(ExprNode::Add(a,b)),
     AppExpr,
 }
 
-AppExpr: Box<Expr> = {
-    <f:AppExpr> <a:AtomExpr> => Box::new(Expr::App(f, a)),
+AppExpr: Expr = {
+    <f:AppExpr> <a:AtomExpr> => Rc::new(ExprNode::App(f, a)),
     AtomExpr,
 };
 
-AtomExpr: Box<Expr> = {
-    Ident => Box::new(Expr::Var(<>)),
-    Num => Box::new(Expr::Num(<>)),
+AtomExpr: Expr = {
+    Ident => Rc::new(ExprNode::Var(<>)),
+    Num => Rc::new(ExprNode::Num(<>)),
     "(" <Expr> ")",
 };
 
