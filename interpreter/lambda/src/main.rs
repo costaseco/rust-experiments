@@ -4,8 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::rc::Rc;
 use ast::*;
 
-use crate::Value::Closure;
-
 mod ast;
 
 lalrpop_mod!(pub lambda);
@@ -51,11 +49,11 @@ enum ExprDb {
 
 
 impl<V:Clone> Env<V> {
-    fn push(&self, var:&String, val:Rc<V>) -> Env<V> {
+    fn push(&self, var: &String, val: Rc<V>) -> Env<V> {
         Env::Node(var.clone(), val, Rc::new(self.clone()))
     }
 
-    fn find(&self, var:&String) -> Result<Rc<V>,String> {
+    fn find(&self, var: &String) -> Result<Rc<V>,String> {
         match self {
             Env::Empty => Err(format!("Variable not found {}",var)),
             Env::Node(x,val,next) => 
@@ -64,12 +62,12 @@ impl<V:Clone> Env<V> {
         }
     }
 
-    fn find_idx(&self, var:&String) -> Result<usize,String> {
+    fn find_idx(&self, var: &String) -> Result<usize,String> {
         match self {
             Env::Empty => Err(format!("Variable not found {}",var)),
             Env::Node(x, _, next) => 
                 if x == var { Ok(0) } 
-                else { next.find_idx(var).and_then(|idx| Ok(1+idx)) }
+                else { next.find_idx(var).map(|idx| idx+1) }
         }
     } 
 }
@@ -82,12 +80,15 @@ trait EvalEnv {
     fn eval_env(&self, env:Rc<Env<Value>>) -> Result<Rc<Value>, String>;
 }
 
-trait Utils<T> {
+trait Subst<T> {
     fn subst(&self, var: &T, val: &Self) -> Self;
+}
+
+trait ToDebruijn {
     fn to_debruijn(&self, env: &Env<()>) -> ExprDb;
 }
 
-impl Utils<String> for Expr {
+impl Subst<String> for Expr {
     fn subst(&self, var: &String, val: &Expr) -> Expr {
         match self {
             Expr::Var(x) => if x == var { val.clone() } else { self.clone() },
@@ -102,6 +103,9 @@ impl Utils<String> for Expr {
         }
     }
 
+}
+
+impl ToDebruijn for Expr {
     fn to_debruijn(&self, env: &Env<()>) -> ExprDb {
         match self {
             Expr::Var(x) => {
@@ -126,7 +130,7 @@ impl Utils<String> for Expr {
     }
 }
 
-impl Utils<usize> for ExprDb {
+impl Subst<usize> for ExprDb {
     fn subst(&self, var: &usize, val: &ExprDb) -> ExprDb {
         match self {
             ExprDb::Var(x, _) => if x == var { val.clone() } else { self.clone() },
@@ -139,9 +143,6 @@ impl Utils<usize> for ExprDb {
         }
     }
 
-    fn to_debruijn(&self, _: &Env<()>) -> ExprDb {
-        self.clone()
-    }
 }
 
 impl Eval for Expr {
@@ -188,7 +189,7 @@ impl EvalEnv for Expr {
                 .find(x)
                 .map(|v| v.clone())
                 .or(Ok(Rc::new(Value::Var(x.clone())))),
-            Expr::Abs(x, e) => Ok(Rc::new(Closure(x.clone(), e.clone(), env.clone()))),
+            Expr::Abs(x, e) => Ok(Rc::new(Value::Closure(x.clone(), e.clone(), env.clone()))),
             Expr::App(e1, e2) => {
                 let v1 = e1.eval_env(env.clone());
                 let v2 = e2.eval_env(env);

@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use crate::ast::Expr;
 use crate::lambda;
-use crate::{Env, Eval, EvalEnv, ExprDb, Utils, Value};
+use crate::{Env, Eval, EvalEnv, ExprDb, ToDebruijn, Value};
 
 fn parse(input: &str) -> Expr {
     *lambda::ExprParser::new().parse(input).unwrap()
