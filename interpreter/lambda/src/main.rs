@@ -185,7 +185,7 @@ impl Eval for Expr {
 
             ExprNode::Add(e1,e2) => {
                 match (e1.eval()?.as_ref(),e2.eval()?.as_ref()) {
-                    (ExprNode::Num(n), ExprNode::Num(m)) => Ok(Rc::new(ExprNode::Num(*n + *m))),
+                    (ExprNode::Num(n), ExprNode::Num(m)) => Ok(Rc::new(ExprNode::Num(n + m))),
                     _ => Err("Expecting integers".into())
                 }
             }
@@ -271,7 +271,7 @@ impl Eval for ExprDb {
                 let v1 = e1.eval();
                 let v2 = e2.eval();
                 match (v1?.as_ref(),v2?.as_ref()) {
-                    (ExprDbNode::Num(n), ExprDbNode::Num(m)) => Ok(Rc::new(ExprDbNode::Num(*n + *m))),
+                    (ExprDbNode::Num(n), ExprDbNode::Num(m)) => Ok(Rc::new(ExprDbNode::Num(n + m))),
                         _ => Err("Expecting integers".into())
                 }
             }
